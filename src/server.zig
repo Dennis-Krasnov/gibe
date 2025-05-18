@@ -695,6 +695,26 @@ test "sends response - non-standard status" {
     try std.testing.expectEqualStrings(serialized, "HTTP/1.1 599\r\ncontent-length: 0\r\n\r\n");
 }
 
+test "sends response - empty reason phrase" {
+    // given
+    const a, const b = try socketPair();
+
+    var response = try model.Response.init(std.testing.allocator);
+    defer response.deinit();
+
+    response.reason_phrase = "";
+    try response.headers.append(model.Header{ .key = "content-length", .value = "0" });
+
+    // when
+    try writeInto(a, &response);
+
+    // then
+    var buffer: [1024]u8 = undefined;
+    const serialized = try readToEnd(b, &buffer);
+
+    try std.testing.expectEqualStrings(serialized, "HTTP/1.1 200\r\ncontent-length: 0\r\n\r\n");
+}
+
 test "sends response - custom reason phrase" {
     // given
     const a, const b = try socketPair();
