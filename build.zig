@@ -1,17 +1,19 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
     const test_filters = b.option([]const []const u8, "test-filter", "Skip tests that don't match the filter") orelse &.{};
 
-    buildUnitTests(b, test_filters);
-    buildExamples(b, test_filters);
+    buildUnitTests(b, target, optimize, test_filters);
+    buildExamples(b, target, optimize, test_filters);
 }
 
-pub fn buildUnitTests(b: *std.Build, test_filters: []const []const u8) void {
+pub fn buildUnitTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_filters: []const []const u8) void {
     const unit_test_mod = b.createModule(.{
         .root_source_file = b.path("src/unit_tests.zig"),
-        .target = b.resolveTargetQuery(.{ .os_tag = .linux, .cpu_arch = .x86_64 }),
-        .optimize = .Debug,
+        .target = target,
+        .optimize = optimize,
     });
 
     const unit_test = b.addTest(.{ .root_module = unit_test_mod, .filters = test_filters });
@@ -28,11 +30,11 @@ const examples = [_][]const u8{
     "unix_domain_socket",
 };
 
-pub fn buildExamples(b: *std.Build, test_filters: []const []const u8) void {
+pub fn buildExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_filters: []const []const u8) void {
     const gibe_module = b.createModule(.{
         .root_source_file = b.path("src/gibe.zig"),
-        .target = b.resolveTargetQuery(.{ .os_tag = .linux, .cpu_arch = .x86_64 }),
-        .optimize = .Debug,
+        .target = target,
+        .optimize = optimize,
     });
 
     const test_step = b.step("test-examples", "Run unit tests in examples");
@@ -41,8 +43,8 @@ pub fn buildExamples(b: *std.Build, test_filters: []const []const u8) void {
         // build
         const exe_mod = b.createModule(.{
             .root_source_file = b.path("examples/" ++ example ++ ".zig"),
-            .target = b.resolveTargetQuery(.{ .os_tag = .linux, .cpu_arch = .x86_64 }),
-            .optimize = .Debug,
+            .target = target,
+            .optimize = optimize,
         });
         exe_mod.addImport("gibe", gibe_module);
 
@@ -59,8 +61,8 @@ pub fn buildExamples(b: *std.Build, test_filters: []const []const u8) void {
         // test
         const unit_test_mod = b.createModule(.{
             .root_source_file = b.path("examples/" ++ example ++ ".zig"),
-            .target = b.resolveTargetQuery(.{ .os_tag = .linux, .cpu_arch = .x86_64 }),
-            .optimize = .Debug,
+            .target = target,
+            .optimize = optimize,
         });
         unit_test_mod.addImport("gibe", gibe_module);
 
