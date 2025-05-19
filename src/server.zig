@@ -208,67 +208,26 @@ fn isAscii(string: []const u8) bool {
 }
 
 fn writeInto(socket: std.posix.fd_t, response: *const model.Response) !void {
-    {
-        const http_version = "HTTP/1.1 ";
-        const n = try std.posix.write(socket, http_version);
-        std.debug.assert(n == http_version.len);
-    }
-    {
-        var buffer: [20]u8 = undefined;
-        const status = std.fmt.bufPrintIntToSlice(&buffer, @intFromEnum(response.status), 10, .lower, .{});
+    const stream = std.net.Stream{ .handle = socket };
 
-        const n = try std.posix.write(socket, status);
-        std.debug.assert(n == status.len);
-    }
+    // TODO: ArrayList on the arena. then writev (stream.writevAll(.{});)
 
-    const reason_phrase = response.reason_phrase orelse response.status.defaultReasonPhrase();
-    if (reason_phrase) |reason| {
+    var buffered = std.io.bufferedWriter(stream.writer());
+    try buffered.writer().print("HTTP/1.1 {d}", .{@intFromEnum(response.status)});
+    if (response.reason_phrase orelse response.status.defaultReasonPhrase()) |reason| {
         if (reason.len > 0) {
-            {
-                const space = " ";
-                const n = try std.posix.write(socket, space);
-                std.debug.assert(n == space.len);
-            }
-
-            const n = try std.posix.write(socket, reason);
-            std.debug.assert(n == reason.len);
+            try buffered.writer().writeAll(" ");
+            try buffered.writer().writeAll(reason);
         }
     }
-    {
-        const newline = "\r\n";
-        const n = try std.posix.write(socket, newline);
-        std.debug.assert(n == newline.len);
-    }
+    try buffered.writer().writeAll("\r\n");
     for (response.headers.items) |header| {
-        {
-            const n = try std.posix.write(socket, header.key);
-            std.debug.assert(n == header.key.len);
-        }
-
-        {
-            const n = try std.posix.write(socket, ": ");
-            std.debug.assert(n == ": ".len);
-        }
-
-        {
-            const n = try std.posix.write(socket, header.value);
-            std.debug.assert(n == header.value.len);
-        }
-
-        {
-            const newline = "\r\n";
-            const n = try std.posix.write(socket, newline);
-            std.debug.assert(n == newline.len);
-        }
+        try buffered.writer().print("{s}: {s}\r\n", .{ header.key, header.value });
     }
-    {
-        const newline = "\r\n";
-        const n = try std.posix.write(socket, newline);
-        std.debug.assert(n == newline.len);
-    }
+    try buffered.writer().writeAll("\r\n");
+    try buffered.flush();
 
-    const n = try std.posix.write(socket, response.body);
-    std.debug.assert(n == response.body.len);
+    try stream.writeAll(response.body);
 
     std.posix.close(socket);
 }
