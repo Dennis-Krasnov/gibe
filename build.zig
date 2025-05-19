@@ -5,8 +5,14 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const test_filters = b.option([]const []const u8, "test-filter", "Skip tests that don't match the filter") orelse &.{};
 
+    const gibe_module = b.addModule("gibe", .{
+        .root_source_file = b.path("src/gibe.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     buildUnitTests(b, target, optimize, test_filters);
-    buildExamples(b, target, optimize, test_filters);
+    buildExamples(b, gibe_module, target, optimize, test_filters);
 }
 
 pub fn buildUnitTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_filters: []const []const u8) void {
@@ -30,13 +36,7 @@ const examples = [_][]const u8{
     "unix_domain_socket",
 };
 
-pub fn buildExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_filters: []const []const u8) void {
-    const gibe_module = b.createModule(.{
-        .root_source_file = b.path("src/gibe.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
+pub fn buildExamples(b: *std.Build, gibe_module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_filters: []const []const u8) void {
     const test_step = b.step("test-examples", "Run unit tests in examples");
 
     inline for (examples) |example| {
