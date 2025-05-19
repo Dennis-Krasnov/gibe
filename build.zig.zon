@@ -1,0 +1,7 @@
+.{
+    .name = .gibe,
+    .paths = .{""},
+    .version = "0.0.1",
+    .fingerprint = 0xaaa07cfb1e7e8e38,
+    .dependencies = .{},
+}
