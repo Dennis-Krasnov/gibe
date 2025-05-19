@@ -1,6 +1,7 @@
 const std = @import("std");
 const gibe = @import("gibe");
 
+/// curl -v -X POST http://127.0.0.1:5882 --data-raw "hello"
 pub fn main() !void {
     const tcp_server: std.posix.fd_t = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
     defer std.posix.close(tcp_server);

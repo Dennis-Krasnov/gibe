@@ -1,6 +1,7 @@
 const std = @import("std");
 const gibe = @import("gibe");
 
+/// curl -v -X POST http://127.0.0.1:5882 --data-raw "hello"
 pub fn main() !void {
     const address = try std.net.Address.parseIp("127.0.0.1", 5882);
 
