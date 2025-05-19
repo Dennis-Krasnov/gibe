@@ -22,7 +22,7 @@ fn worker(address: std.net.Address) !void {
     try std.posix.setsockopt(tcp_server, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, &std.mem.toBytes(@as(c_int, 1))); // essential for performance
 
     try std.posix.bind(tcp_server, &address.any, address.getOsSockLen());
-    try std.posix.listen(tcp_server, 128);
+    try std.posix.listen(tcp_server, 1024);
     std.log.info("listening on 127.0.0.1:5882", .{});
 
     var http_server = gibe.Server.init(std.heap.smp_allocator);

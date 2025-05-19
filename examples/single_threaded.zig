@@ -9,11 +9,11 @@ pub fn main() !void {
 
     const address = try std.net.Address.parseIp("127.0.0.1", 5882);
     try std.posix.bind(tcp_server, &address.any, address.getOsSockLen());
-    try std.posix.listen(tcp_server, 128);
+    try std.posix.listen(tcp_server, 1024);
+    std.log.info("listening on 127.0.0.1:5882", .{});
 
     var http_server = gibe.Server.init(std.heap.smp_allocator);
     defer http_server.deinit();
-    std.log.info("listening on 127.0.0.1:5882", .{});
 
     while (true) {
         const tcp_client: std.posix.fd_t = try std.posix.accept(tcp_server, null, null, 0);

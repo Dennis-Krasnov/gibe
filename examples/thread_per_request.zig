@@ -9,7 +9,7 @@ pub fn main() !void {
 
     const address = try std.net.Address.parseIp("127.0.0.1", 5882);
     try std.posix.bind(tcp_server, &address.any, address.getOsSockLen());
-    try std.posix.listen(tcp_server, 128);
+    try std.posix.listen(tcp_server, 1024);
     std.log.info("listening on 127.0.0.1:5882", .{});
 
     while (true) {
