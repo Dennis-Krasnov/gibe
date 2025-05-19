@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const model = @import("model.zig");
+const CircularBuffer = @import("circular_buffer.zig").CircularBuffer;
 
 /// ...
 pub const Server = struct {
@@ -24,8 +25,11 @@ pub const Server = struct {
         defer _ = self.arena.reset(.retain_capacity);
         const arena_allocator = self.arena.allocator();
 
+        var circular_buffer = try CircularBuffer.init(4096);
+        defer circular_buffer.deinit();
+
         var request = try model.Request.init(arena_allocator);
-        try readInto(socket, &request);
+        try readInto(socket, &circular_buffer, &request);
 
         var response = try model.Response.init(arena_allocator);
 
@@ -69,22 +73,19 @@ const stringToMethod = std.StaticStringMap(model.Method).initComptime(.{
     .{ "CONNECT", .connect },
 });
 
-fn readInto(socket: std.posix.fd_t, request: *model.Request) !void {
-    var buffer: [1024]u8 = undefined;
+fn readInto(socket: std.posix.fd_t, circular_buffer: *CircularBuffer, request: *model.Request) !void {
     var bytes_parsed: usize = 0;
-    var bytes_read: usize = 0;
 
     while (true) {
-        // TODO: if (bytes_read == buffer.len) return error.RequestTooBig;
-
         // TODO: place after if for symmetry. do one unconditional before the loop?
-        const n = try std.posix.read(socket, buffer[bytes_read..]);
+        if (circular_buffer.data().len == circular_buffer.size) return error.RequestTooBig;
+        const n = try std.posix.read(socket, circular_buffer.uninitialized());
         if (n == 0) return error.EOF; // TODO: more descriptive error
-        bytes_read += n;
+        circular_buffer.commit(n);
 
-        if (std.mem.indexOf(u8, buffer[bytes_parsed..bytes_read], " ")) |space_idx| {
+        if (std.mem.indexOf(u8, circular_buffer.data()[bytes_parsed..], " ")) |space_idx| {
             if (space_idx == 0) return error.MissingMethod;
-            const raw_method = buffer[bytes_parsed .. bytes_parsed + space_idx];
+            const raw_method = circular_buffer.data()[bytes_parsed .. bytes_parsed + space_idx];
             if (!isAscii(raw_method)) return error.NotAscii;
 
             request.method = stringToMethod.get(raw_method) orelse .{ .other = raw_method };
@@ -95,9 +96,9 @@ fn readInto(socket: std.posix.fd_t, request: *model.Request) !void {
     }
 
     while (true) {
-        if (std.mem.indexOf(u8, buffer[bytes_parsed..bytes_read], " ")) |space_idx| {
+        if (std.mem.indexOf(u8, circular_buffer.data()[bytes_parsed..], " ")) |space_idx| {
             if (space_idx == 0) return error.MissingPath;
-            const raw_path = buffer[bytes_parsed .. bytes_parsed + space_idx];
+            const raw_path = circular_buffer.data()[bytes_parsed .. bytes_parsed + space_idx];
             if (!isAscii(raw_path)) return error.NotAscii;
 
             if (std.mem.indexOf(u8, raw_path, "?")) |question_idx| {
@@ -121,14 +122,15 @@ fn readInto(socket: std.posix.fd_t, request: *model.Request) !void {
             break;
         }
 
-        const n = try std.posix.read(socket, buffer[bytes_read..]);
-        if (n == 0) return error.EOF;
-        bytes_read += n;
+        if (circular_buffer.data().len == circular_buffer.size) return error.RequestTooBig;
+        const n = try std.posix.read(socket, circular_buffer.uninitialized());
+        if (n == 0) return error.EOF; // TODO: more descriptive error
+        circular_buffer.commit(n);
     }
 
     while (true) {
-        if (std.mem.indexOf(u8, buffer[bytes_parsed..bytes_read], "\r\n")) |crlf_idx| {
-            const raw_version = buffer[bytes_parsed .. bytes_parsed + crlf_idx];
+        if (std.mem.indexOf(u8, circular_buffer.data()[bytes_parsed..], "\r\n")) |crlf_idx| {
+            const raw_version = circular_buffer.data()[bytes_parsed .. bytes_parsed + crlf_idx];
 
             if (!std.mem.eql(u8, raw_version, "HTTP/1.1")) {
                 return error.UnsupportedHttpVersion;
@@ -138,21 +140,22 @@ fn readInto(socket: std.posix.fd_t, request: *model.Request) !void {
             break;
         }
 
-        const n = try std.posix.read(socket, buffer[bytes_read..]);
-        if (n == 0) return error.EOF;
-        bytes_read += n;
+        if (circular_buffer.data().len == circular_buffer.size) return error.RequestTooBig;
+        const n = try std.posix.read(socket, circular_buffer.uninitialized());
+        if (n == 0) return error.EOF; // TODO: more descriptive error
+        circular_buffer.commit(n);
     }
 
     var content_length: ?usize = null;
 
     while (true) {
-        if (std.mem.indexOf(u8, buffer[bytes_parsed..bytes_read], "\r\n")) |crlf_idx| {
+        if (std.mem.indexOf(u8, circular_buffer.data()[bytes_parsed..], "\r\n")) |crlf_idx| {
             if (crlf_idx == 0) {
                 bytes_parsed += "\r\n".len;
                 break;
             }
 
-            const raw_header = buffer[bytes_parsed .. bytes_parsed + crlf_idx];
+            const raw_header = circular_buffer.data()[bytes_parsed .. bytes_parsed + crlf_idx];
             if (!isAscii(raw_header)) return error.NotAscii;
 
             if (std.mem.indexOf(u8, raw_header, ":")) |colon_idx| {
@@ -183,20 +186,22 @@ fn readInto(socket: std.posix.fd_t, request: *model.Request) !void {
             continue;
         }
 
-        const n = try std.posix.read(socket, buffer[bytes_read..]);
-        if (n == 0) return error.EOF;
-        bytes_read += n;
+        if (circular_buffer.data().len == circular_buffer.size) return error.RequestTooBig;
+        const n = try std.posix.read(socket, circular_buffer.uninitialized());
+        if (n == 0) return error.EOF; // TODO: more descriptive error
+        circular_buffer.commit(n);
     }
 
     if (content_length) |len| {
         // TODO: otherwise assume zero length?
-        while (bytes_read < bytes_parsed + len) {
-            const n = try std.posix.read(socket, buffer[bytes_read..]);
-            if (n == 0) return error.EOF;
-            bytes_read += n;
+        while (circular_buffer.data().len < bytes_parsed + len) {
+            if (circular_buffer.data().len == circular_buffer.size) return error.RequestTooBig;
+            const n = try std.posix.read(socket, circular_buffer.uninitialized());
+            if (n == 0) return error.EOF; // TODO: more descriptive error
+            circular_buffer.commit(n);
         }
 
-        request.body = buffer[bytes_parsed .. bytes_parsed + len];
+        request.body = circular_buffer.data()[bytes_parsed .. bytes_parsed + len];
     }
 }
 
@@ -251,7 +256,6 @@ fn writeSlowly(socket: std.posix.fd_t, request: []const u8) !void {
         const n = random.uintAtMost(usize, request.len - bytes_wrote);
         bytes_wrote += try std.posix.write(socket, request[bytes_wrote .. bytes_wrote + n]);
 
-        std.log.warn("wrote {d} bytes", .{n});
         std.Thread.sleep(random.uintAtMost(u64, 100) * std.time.ns_per_us);
     }
 
@@ -265,11 +269,14 @@ test "receives request - GET method" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    try readInto(b, &request);
+    try readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectEqualDeep(request.method, .get);
@@ -282,11 +289,14 @@ test "receives request - HEAD method" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "HEAD / HTTP/1.1\r\nHost: example.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    try readInto(b, &request);
+    try readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectEqualDeep(request.method, .head);
@@ -299,11 +309,14 @@ test "receives request - non-standard method" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "BOOP / HTTP/1.1\r\nHost: example.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    try readInto(b, &request);
+    try readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectEqualDeep(request.method, model.Method{ .other = "BOOP" });
@@ -316,11 +329,14 @@ test "receives request - fails on empty method" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, " / HTTP/1.1\r\nHost: example.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    const result = readInto(b, &request);
+    const result = readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectError(error.MissingMethod, result);
@@ -333,11 +349,14 @@ test "receives request - fails on non-ascii method" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "über / HTTP/1.1\r\nHost: example.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    const result = readInto(b, &request);
+    const result = readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectError(error.NotAscii, result);
@@ -350,11 +369,14 @@ test "receives request - index path" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    try readInto(b, &request);
+    try readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectEqualStrings(request.path, "/");
@@ -371,11 +393,14 @@ test "receives request - non-index path with query parameters" {
     });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    try readInto(b, &request);
+    try readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectEqualStrings(request.path, "/foo/bar");
@@ -395,11 +420,14 @@ test "receives request - fails on missing path" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "GET  HTTP/1.1\r\nHost: example.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    const result = readInto(b, &request);
+    const result = readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectError(error.MissingPath, result);
@@ -412,11 +440,14 @@ test "receives request - fails on missing path with query parameters" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "GET ?foo=bar HTTP/1.1\r\nHost: example.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    const result = readInto(b, &request);
+    const result = readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectError(error.MissingPath, result);
@@ -429,11 +460,14 @@ test "receives request - fails on non-ascii path" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "GET /über HTTP/1.1\r\nHost: example.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    const result = readInto(b, &request);
+    const result = readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectError(error.NotAscii, result);
@@ -446,11 +480,14 @@ test "receives request - fails on non-v1.1" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "GET / HTTP/0.9\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    const result = readInto(b, &request);
+    const result = readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectError(error.UnsupportedHttpVersion, result);
@@ -466,11 +503,14 @@ test "receives request - headers" {
     });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    try readInto(b, &request);
+    try readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectEqual(request.headers.items.len, 6);
@@ -489,11 +529,14 @@ test "receives request - fails on missing header key" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "GET / HTTP/1.1\r\nHost: example.com\r\n:foo\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    const result = readInto(b, &request);
+    const result = readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectError(error.MissingHeaderKey, result);
@@ -506,11 +549,14 @@ test "receives request - fails on non-ascii header" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "GET / HTTP/1.1\r\nHost: über.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    const result = readInto(b, &request);
+    const result = readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectError(error.NotAscii, result);
@@ -523,11 +569,14 @@ test "receives request - empty body" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    try readInto(b, &request);
+    try readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectEqualStrings(request.body, "");
@@ -540,11 +589,14 @@ test "receives request - non-empty body" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "POST /greeting HTTP/1.1\r\nHost: example.com\r\ncontent-length: 5\r\n\r\nhello" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    try readInto(b, &request);
+    try readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectEqualStrings(request.body, "hello");
@@ -557,11 +609,14 @@ test "receives request - fails on negative content-length" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "POST /greeting HTTP/1.1\r\nHost: example.com\r\ncontent-length: -5\r\n\r\nhello" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    const result = readInto(b, &request);
+    const result = readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectError(error.InvalidContentLength, result);
@@ -574,14 +629,42 @@ test "receives request - fails on non-base-10 content-length" {
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, "POST /greeting HTTP/1.1\r\nHost: example.com\r\ncontent-length: 0xAA\r\n\r\nhello" });
     defer handle.join();
 
+    var circular_buffer = try CircularBuffer.init(4096);
+    defer circular_buffer.deinit();
+
     var request = try model.Request.init(std.testing.allocator);
     defer request.deinit();
 
     // when
-    const result = readInto(b, &request);
+    const result = readInto(b, &circular_buffer, &request);
 
     // then
     try std.testing.expectError(error.InvalidContentLength, result);
+}
+
+test "receives request - fails when request too big" {
+    const serialized = "POST /greeting HTTP/1.1\r\nHost: example.com\r\ncontent-length: 5\r\n\r\nhello";
+
+    for (1..serialized.len) |buffer_size| {
+        // given
+        const a, const b = try socketPair();
+
+        const handle = try std.Thread.spawn(.{}, writeSlowly, .{ a, serialized });
+        defer handle.join();
+
+        var circular_buffer = try CircularBuffer.init(buffer_size);
+        defer circular_buffer.deinit();
+        // TODO: artificially fill up with a commit once buffer size is page aligned
+
+        var request = try model.Request.init(std.testing.allocator);
+        defer request.deinit();
+
+        // when
+        const result = readInto(b, &circular_buffer, &request);
+
+        // then
+        try std.testing.expectError(error.RequestTooBig, result);
+    }
 }
 
 // for tests
