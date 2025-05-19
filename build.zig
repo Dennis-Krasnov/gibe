@@ -25,6 +25,7 @@ const examples = [_][]const u8{
     "single_threaded",
     "thread_per_request",
     "thread_pool",
+    "unix_domain_socket",
 };
 
 pub fn buildExamples(b: *std.Build, test_filters: []const []const u8) void {
