@@ -2,13 +2,15 @@ const std = @import("std");
 const gibe = @import("gibe");
 
 /// curl -v -X POST http://127.0.0.1:5882 --data-raw "hello"
+/// curl -v -X POST "http://[::1]:5882" --data-raw "hello"
 pub fn main() !void {
-    const tcp_server: std.posix.fd_t = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    const address = try std.net.Address.parseIp("::", 5882); // dual stack
+
+    const tcp_server: std.posix.fd_t = try std.posix.socket(address.any.family, std.posix.SOCK.STREAM, 0);
     defer std.posix.close(tcp_server);
 
     try std.posix.setsockopt(tcp_server, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
 
-    const address = try std.net.Address.parseIp("127.0.0.1", 5882);
     try std.posix.bind(tcp_server, &address.any, address.getOsSockLen());
     try std.posix.listen(tcp_server, 1024);
     std.log.info("listening on 127.0.0.1:5882", .{});
@@ -26,7 +28,9 @@ fn worker(tcp_client: std.posix.fd_t) !void {
     var http_server = gibe.Server.init(std.heap.smp_allocator);
     defer http_server.deinit();
 
-    try http_server.run(tcp_client, void, handle, {});
+    http_server.run(tcp_client, void, handle, {}) catch |err| {
+        std.log.err("HTTP server error: {}", .{err});
+    };
 }
 
 fn handle(_: std.mem.Allocator, request: *gibe.Request, response: *gibe.Response) !void {
@@ -36,16 +40,11 @@ fn handle(_: std.mem.Allocator, request: *gibe.Request, response: *gibe.Response
 
 test "smoke" {
     // given
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var request = try gibe.Request.init(arena.allocator());
+    const arena, var request, var response = gibe.leakyInit();
     request.body = "hello";
 
-    var response = try gibe.Response.init(arena.allocator());
-
     // when
-    try handle(arena.allocator(), &request, &response);
+    try handle(arena, &request, &response);
 
     // then
     try std.testing.expectEqual(response.status, .ok);

@@ -24,7 +24,9 @@ pub fn main() !void {
         const uds_client: std.posix.fd_t = try std.posix.accept(uds_server, null, null, 0);
         // defer std.posix.close(uds_client);
 
-        try http_server.run(uds_client, void, handle, {});
+        http_server.run(uds_client, void, handle, {}) catch |err| {
+            std.log.err("HTTP server error: {}", .{err});
+        };
     }
 }
 
@@ -35,16 +37,11 @@ fn handle(_: std.mem.Allocator, request: *gibe.Request, response: *gibe.Response
 
 test "smoke" {
     // given
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var request = try gibe.Request.init(arena.allocator());
+    const arena, var request, var response = gibe.leakyInit();
     request.body = "hello";
 
-    var response = try gibe.Response.init(arena.allocator());
-
     // when
-    try handle(arena.allocator(), &request, &response);
+    try handle(arena, &request, &response);
 
     // then
     try std.testing.expectEqual(response.status, .ok);

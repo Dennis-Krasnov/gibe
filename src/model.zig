@@ -1,5 +1,11 @@
 const std = @import("std");
+const multipart_form_data = @import("multipart_form_data.zig");
 
+pub const MultipartFormData = multipart_form_data.MultipartFormData;
+pub const Part = multipart_form_data.Part;
+
+/// Created and destroyed by the library.
+/// Use gibe.leakyInit() to create an instance for testing.
 pub const Request = struct {
     method: Method,
     /// Part of URI.
@@ -9,19 +15,34 @@ pub const Request = struct {
     headers: std.ArrayList(Header),
     body: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Request {
-        return Request{
-            .method = .get,
-            .path = "/",
-            .query = try std.ArrayList(QueryParameter).initCapacity(allocator, 8),
-            .headers = try std.ArrayList(Header).initCapacity(allocator, 32),
-            .body = "",
-        };
+    /// Finds the first occurrence of query pameter by key, if any, returning the value.
+    pub fn findQuery(self: Request, key: []const u8) ?[]const u8 {
+        for (self.query.items) |param| {
+            if (std.ascii.eqlIgnoreCase(param.key, key)) {
+                return param.value;
+            }
+        }
+
+        return null;
     }
 
-    pub fn deinit(self: Request) void {
-        self.query.deinit();
-        self.headers.deinit();
+    /// Finds the first occurrence of header by key, if any, returning the value.
+    pub fn findHeader(self: Request, key: []const u8) ?[]const u8 {
+        for (self.headers.items) |header| {
+            if (std.ascii.eqlIgnoreCase(header.key, key)) {
+                return header.value;
+            }
+        }
+
+        return null;
+    }
+
+    /// ...
+    // TODO: error should be union of the two parses and missing
+    pub fn multipartFormData(self: Request, allocator: std.mem.Allocator) !MultipartFormData {
+        const content_type = self.findHeader("content-type") orelse return error.MissingContentType;
+        const boundary = try multipart_form_data.parseBoundary(content_type);
+        return multipart_form_data.parseBody(allocator, boundary, self.body);
     }
 };
 
@@ -84,24 +105,13 @@ pub const Header = struct {
     value: []const u8,
 };
 
+/// Created and destroyed by the library.
+/// Use gibe.leakyInit() to create an instance for testing.
 pub const Response = struct {
     status: StatusCode,
     reason_phrase: ?[]const u8,
     headers: std.ArrayList(Header),
     body: []const u8,
-
-    pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Response {
-        return Response{
-            .status = .ok,
-            .reason_phrase = null,
-            .headers = try std.ArrayList(Header).initCapacity(allocator, 32),
-            .body = "",
-        };
-    }
-
-    pub fn deinit(self: Response) void {
-        self.headers.deinit();
-    }
 };
 
 /// Response status codes.

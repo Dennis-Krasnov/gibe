@@ -21,17 +21,21 @@ pub const Server = struct {
     }
 
     /// ...
-    pub fn run(self: *Server, socket: std.posix.fd_t, comptime State: type, handler: Handler(State), state: State) !void {
+    pub fn run(self: *Server, socket: std.posix.socket_t, comptime State: type, handler: Handler(State), state: State) !void {
         defer _ = self.arena.reset(.retain_capacity);
         const arena_allocator = self.arena.allocator();
 
         var circular_buffer = try CircularBuffer.init(4096);
         defer circular_buffer.deinit();
 
-        var request = try model.Request.init(arena_allocator);
-        try readInto(socket, &circular_buffer, &request);
+        var request = try readInto(arena_allocator, socket, &circular_buffer);
 
-        var response = try model.Response.init(arena_allocator);
+        var response = model.Response{
+            .status = .ok,
+            .reason_phrase = null,
+            .headers = try std.ArrayList(model.Header).initCapacity(arena_allocator, 32),
+            .body = "",
+        };
 
         if (State == void) {
             try handler(arena_allocator, &request, &response);
@@ -73,7 +77,17 @@ const stringToMethod = std.StaticStringMap(model.Method).initComptime(.{
     .{ "CONNECT", .connect },
 });
 
-fn readInto(socket: std.posix.fd_t, circular_buffer: *CircularBuffer, request: *model.Request) !void {
+fn readInto(allocator: std.mem.Allocator, socket: std.posix.fd_t, circular_buffer: *CircularBuffer) !model.Request {
+    var request = model.Request{
+        .method = .get,
+        .path = "/",
+        .query = try std.ArrayList(model.QueryParameter).initCapacity(allocator, 8),
+        .headers = try std.ArrayList(model.Header).initCapacity(allocator, 32),
+        .body = "",
+    };
+    errdefer request.query.deinit();
+    errdefer request.headers.deinit();
+
     var bytes_parsed: usize = 0;
 
     while (true) {
@@ -107,10 +121,14 @@ fn readInto(socket: std.posix.fd_t, circular_buffer: *CircularBuffer, request: *
 
                 var iter = std.mem.splitScalar(u8, raw_path[question_idx + "?".len ..], '&');
                 while (iter.next()) |raw_param| {
-                    const query_param = if (std.mem.indexOf(u8, raw_param, "=")) |equal_idx|
-                        model.QueryParameter{ .key = raw_param[0..equal_idx], .value = raw_param[equal_idx + "=".len ..] }
-                    else
-                        model.QueryParameter{ .key = raw_param, .value = null };
+                    const query_param = if (std.mem.indexOf(u8, raw_param, "=")) |equal_idx| blk: {
+                        const key = percentToUrlEncoding(std.Uri.percentDecodeInPlace(@constCast(raw_param[0..equal_idx])));
+                        const value = percentToUrlEncoding(std.Uri.percentDecodeInPlace(@constCast(raw_param[equal_idx + "=".len ..])));
+                        break :blk model.QueryParameter{ .key = key, .value = value };
+                    } else blk: {
+                        const key = percentToUrlEncoding(std.Uri.percentDecodeInPlace(@constCast(raw_param)));
+                        break :blk model.QueryParameter{ .key = key, .value = null };
+                    };
 
                     try request.query.append(query_param);
                 }
@@ -203,6 +221,8 @@ fn readInto(socket: std.posix.fd_t, circular_buffer: *CircularBuffer, request: *
 
         request.body = circular_buffer.data()[bytes_parsed .. bytes_parsed + len];
     }
+
+    return request;
 }
 
 fn isAscii(string: []const u8) bool {
@@ -210,6 +230,16 @@ fn isAscii(string: []const u8) bool {
         if (!std.ascii.isAscii(c)) return false;
     }
     return true;
+}
+
+fn percentToUrlEncoding(string: []u8) []const u8 {
+    for (string) |*c| {
+        if (c.* == '+') {
+            c.* = ' ';
+        }
+    }
+
+    return string;
 }
 
 fn writeInto(socket: std.posix.fd_t, response: *const model.Response) !void {
@@ -272,11 +302,8 @@ test "receives request - GET method" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    try readInto(b, &circular_buffer, &request);
+    const request = try readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectEqualDeep(request.method, .get);
@@ -292,11 +319,8 @@ test "receives request - HEAD method" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    try readInto(b, &circular_buffer, &request);
+    const request = try readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectEqualDeep(request.method, .head);
@@ -312,11 +336,8 @@ test "receives request - non-standard method" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    try readInto(b, &circular_buffer, &request);
+    const request = try readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectEqualDeep(request.method, model.Method{ .other = "BOOP" });
@@ -332,11 +353,8 @@ test "receives request - fails on empty method" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    const result = readInto(b, &circular_buffer, &request);
+    const result = readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectError(error.MissingMethod, result);
@@ -352,11 +370,8 @@ test "receives request - fails on non-ascii method" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    const result = readInto(b, &circular_buffer, &request);
+    const result = readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectError(error.NotAscii, result);
@@ -372,11 +387,8 @@ test "receives request - index path" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    try readInto(b, &circular_buffer, &request);
+    const request = try readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectEqualStrings(request.path, "/");
@@ -389,28 +401,26 @@ test "receives request - non-index path with query parameters" {
 
     const handle = try std.Thread.spawn(.{}, writeSlowly, .{
         a,
-        "GET /foo/bar?foo=bar&duplicate=1&duplicate=2&empty=&flag& HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        "GET /foo/bar?foo=bar&per+cent=enc%20oded&duplicate=1&duplicate=2&empty=&flag& HTTP/1.1\r\nHost: example.com\r\n\r\n",
     });
     defer handle.join();
 
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    try readInto(b, &circular_buffer, &request);
+    const request = try readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectEqualStrings(request.path, "/foo/bar");
-    try std.testing.expectEqual(request.query.items.len, 6);
+    try std.testing.expectEqual(request.query.items.len, 7);
     try std.testing.expectEqualDeep(request.query.items[0], model.QueryParameter{ .key = "foo", .value = "bar" });
-    try std.testing.expectEqualDeep(request.query.items[1], model.QueryParameter{ .key = "duplicate", .value = "1" });
-    try std.testing.expectEqualDeep(request.query.items[2], model.QueryParameter{ .key = "duplicate", .value = "2" });
-    try std.testing.expectEqualDeep(request.query.items[3], model.QueryParameter{ .key = "empty", .value = "" });
-    try std.testing.expectEqualDeep(request.query.items[4], model.QueryParameter{ .key = "flag", .value = null });
-    try std.testing.expectEqualDeep(request.query.items[5], model.QueryParameter{ .key = "", .value = null });
+    try std.testing.expectEqualDeep(request.query.items[1], model.QueryParameter{ .key = "per cent", .value = "enc oded" });
+    try std.testing.expectEqualDeep(request.query.items[2], model.QueryParameter{ .key = "duplicate", .value = "1" });
+    try std.testing.expectEqualDeep(request.query.items[3], model.QueryParameter{ .key = "duplicate", .value = "2" });
+    try std.testing.expectEqualDeep(request.query.items[4], model.QueryParameter{ .key = "empty", .value = "" });
+    try std.testing.expectEqualDeep(request.query.items[5], model.QueryParameter{ .key = "flag", .value = null });
+    try std.testing.expectEqualDeep(request.query.items[6], model.QueryParameter{ .key = "", .value = null });
 }
 
 test "receives request - fails on missing path" {
@@ -423,11 +433,8 @@ test "receives request - fails on missing path" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    const result = readInto(b, &circular_buffer, &request);
+    const result = readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectError(error.MissingPath, result);
@@ -443,11 +450,8 @@ test "receives request - fails on missing path with query parameters" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    const result = readInto(b, &circular_buffer, &request);
+    const result = readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectError(error.MissingPath, result);
@@ -463,11 +467,8 @@ test "receives request - fails on non-ascii path" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    const result = readInto(b, &circular_buffer, &request);
+    const result = readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectError(error.NotAscii, result);
@@ -483,11 +484,8 @@ test "receives request - fails on non-v1.1" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    const result = readInto(b, &circular_buffer, &request);
+    const result = readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectError(error.UnsupportedHttpVersion, result);
@@ -506,11 +504,8 @@ test "receives request - headers" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    try readInto(b, &circular_buffer, &request);
+    const request = try readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectEqual(request.headers.items.len, 6);
@@ -532,11 +527,8 @@ test "receives request - fails on missing header key" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    const result = readInto(b, &circular_buffer, &request);
+    const result = readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectError(error.MissingHeaderKey, result);
@@ -552,11 +544,8 @@ test "receives request - fails on non-ascii header" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    const result = readInto(b, &circular_buffer, &request);
+    const result = readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectError(error.NotAscii, result);
@@ -572,11 +561,8 @@ test "receives request - empty body" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    try readInto(b, &circular_buffer, &request);
+    const request = try readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectEqualStrings(request.body, "");
@@ -592,11 +578,8 @@ test "receives request - non-empty body" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    try readInto(b, &circular_buffer, &request);
+    const request = try readInto(std.heap.smp_allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectEqualStrings(request.body, "hello");
@@ -612,11 +595,8 @@ test "receives request - fails on negative content-length" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    const result = readInto(b, &circular_buffer, &request);
+    const result = readInto(std.testing.allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectError(error.InvalidContentLength, result);
@@ -632,11 +612,8 @@ test "receives request - fails on non-base-10 content-length" {
     var circular_buffer = try CircularBuffer.init(4096);
     defer circular_buffer.deinit();
 
-    var request = try model.Request.init(std.testing.allocator);
-    defer request.deinit();
-
     // when
-    const result = readInto(b, &circular_buffer, &request);
+    const result = readInto(std.testing.allocator, b, &circular_buffer);
 
     // then
     try std.testing.expectError(error.InvalidContentLength, result);
@@ -656,11 +633,8 @@ test "receives request - fails when request too big" {
         defer circular_buffer.deinit();
         // TODO: artificially fill up with a commit once buffer size is page aligned
 
-        var request = try model.Request.init(std.testing.allocator);
-        defer request.deinit();
-
         // when
-        const result = readInto(b, &circular_buffer, &request);
+        const result = readInto(std.heap.smp_allocator, b, &circular_buffer);
 
         // then
         try std.testing.expectError(error.RequestTooBig, result);
@@ -682,8 +656,12 @@ test "sends response - 200 status" {
     // given
     const a, const b = try socketPair();
 
-    var response = try model.Response.init(std.testing.allocator);
-    defer response.deinit();
+    var response = model.Response{
+        .status = .ok,
+        .reason_phrase = null,
+        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .body = "",
+    };
 
     try response.headers.append(model.Header{ .key = "content-length", .value = "0" });
 
@@ -701,11 +679,12 @@ test "sends response - 204 status" {
     // given
     const a, const b = try socketPair();
 
-    var response = try model.Response.init(std.testing.allocator);
-    defer response.deinit();
-
-    response.status = .no_content;
-    // no content length
+    var response = model.Response{
+        .status = .no_content,
+        .reason_phrase = null,
+        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .body = "",
+    };
 
     // when
     try writeInto(a, &response);
@@ -714,6 +693,7 @@ test "sends response - 204 status" {
     var buffer: [1024]u8 = undefined;
     const serialized = try readToEnd(b, &buffer);
 
+    // no content length
     try std.testing.expectEqualStrings(serialized, "HTTP/1.1 204 No Content\r\n\r\n");
 }
 
@@ -721,10 +701,12 @@ test "sends response - non-standard status" {
     // given
     const a, const b = try socketPair();
 
-    var response = try model.Response.init(std.testing.allocator);
-    defer response.deinit();
-
-    response.status = @enumFromInt(599);
+    var response = model.Response{
+        .status = @enumFromInt(599),
+        .reason_phrase = null,
+        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .body = "",
+    };
     try response.headers.append(model.Header{ .key = "content-length", .value = "0" });
 
     // when
@@ -741,10 +723,12 @@ test "sends response - empty reason phrase" {
     // given
     const a, const b = try socketPair();
 
-    var response = try model.Response.init(std.testing.allocator);
-    defer response.deinit();
-
-    response.reason_phrase = "";
+    var response = model.Response{
+        .status = .ok,
+        .reason_phrase = "",
+        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .body = "",
+    };
     try response.headers.append(model.Header{ .key = "content-length", .value = "0" });
 
     // when
@@ -761,10 +745,12 @@ test "sends response - custom reason phrase" {
     // given
     const a, const b = try socketPair();
 
-    var response = try model.Response.init(std.testing.allocator);
-    defer response.deinit();
-
-    response.reason_phrase = "Well Done";
+    var response = model.Response{
+        .status = .ok,
+        .reason_phrase = "Well Done",
+        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .body = "",
+    };
     try response.headers.append(model.Header{ .key = "content-length", .value = "0" });
 
     // when
@@ -781,11 +767,13 @@ test "sends response - with body" {
     // given
     const a, const b = try socketPair();
 
-    var response = try model.Response.init(std.testing.allocator);
-    defer response.deinit();
-
+    var response = model.Response{
+        .status = .ok,
+        .reason_phrase = null,
+        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .body = "hello",
+    };
     try response.headers.append(model.Header{ .key = "content-length", .value = "5" });
-    response.body = "hello";
 
     // when
     try writeInto(a, &response);
