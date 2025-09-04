@@ -25,15 +25,15 @@ pub fn leakyInit() struct { std.mem.Allocator, Request, Response } {
     const request = Request{
         .method = .get,
         .path = "/",
-        .query = std.ArrayList(QueryParameter).init(std.heap.smp_allocator),
-        .headers = std.ArrayList(Header).init(std.heap.smp_allocator),
+        .query = std.array_list.Managed(QueryParameter).init(std.heap.smp_allocator),
+        .headers = std.array_list.Managed(Header).init(std.heap.smp_allocator),
         .body = "",
     };
 
     const response = Response{
         .status = .ok,
         .reason_phrase = null,
-        .headers = std.ArrayList(Header).init(std.heap.smp_allocator),
+        .headers = std.array_list.Managed(Header).init(std.heap.smp_allocator),
         .body = "",
     };
 
