@@ -6,7 +6,7 @@ const model = @import("model.zig");
 
 /// Creates with request.multipartFormData(allocator);
 pub const MultipartFormData = struct {
-    parts: std.ArrayList(Part),
+    parts: std.array_list.Managed(Part),
 
     /// Consumes self.
     pub fn deinit(self: MultipartFormData) void {
@@ -50,13 +50,8 @@ pub fn parseBoundary(content_type: []const u8) ![]const u8 {
 
 // parse shouldn't need dependency of request. take content-type header value and body.
 pub fn parseBody(allocator: std.mem.Allocator, boundary: []const u8, body: []const u8) !MultipartFormData {
-    var parts = try std.ArrayList(Part).initCapacity(allocator, 8);
-    errdefer {
-        for (parts.items) |part| {
-            part.headers.deinit();
-        }
-        parts.deinit();
-    }
+    var multipart_form_data = MultipartFormData{ .parts = try std.array_list.Managed(Part).initCapacity(allocator, 8) };
+    errdefer multipart_form_data.deinit();
 
     var callbacks = std.mem.zeroes(c.multipart_parser_settings);
     callbacks.on_header_field = onHeaderField;
@@ -75,7 +70,7 @@ pub fn parseBody(allocator: std.mem.Allocator, boundary: []const u8, body: []con
 
     var parser = Parser{
         .allocator = allocator,
-        .parts = &parts,
+        .parts = &multipart_form_data.parts,
         ._temp_headers = null,
         ._temp_header_field = null,
         ._body_finished = false,
@@ -87,7 +82,7 @@ pub fn parseBody(allocator: std.mem.Allocator, boundary: []const u8, body: []con
     if (bytes_parsed != body.len) return error.InvalidBody;
     if (!parser._body_finished) return error.InvalidBody;
 
-    return MultipartFormData{ .parts = parts };
+    return multipart_form_data;
 }
 
 fn extendBoundaryZ(allocator: std.mem.Allocator, boundary: []const u8) ![:0]const u8 {
@@ -103,8 +98,8 @@ fn extendBoundaryZ(allocator: std.mem.Allocator, boundary: []const u8) ![:0]cons
 
 const Parser = struct {
     allocator: std.mem.Allocator,
-    parts: *std.ArrayList(Part),
-    _temp_headers: ?std.ArrayList(model.Header),
+    parts: *std.array_list.Managed(Part),
+    _temp_headers: ?std.array_list.Managed(model.Header),
     _temp_header_field: ?[]const u8,
     _body_finished: bool,
 };
@@ -112,7 +107,7 @@ const Parser = struct {
 fn onPartDataBegin(p: ?*c.multipart_parser) callconv(.c) c_int {
     const parser: *Parser = @ptrCast(@alignCast(c.multipart_parser_get_data(p).?));
     std.debug.assert(parser._temp_headers == null);
-    parser._temp_headers = std.ArrayList(model.Header).initCapacity(parser.allocator, 8) catch return 1;
+    parser._temp_headers = std.array_list.Managed(model.Header).initCapacity(parser.allocator, 8) catch return 1;
     return 0;
 }
 
@@ -192,13 +187,13 @@ fn onPartDataEnd(p: ?*c.multipart_parser) callconv(.c) c_int {
 }
 
 fn onBodyEnd(p: ?*c.multipart_parser) callconv(.c) c_int {
-    const parser: *Parser = @alignCast(@ptrCast(c.multipart_parser_get_data(p).?));
+    const parser: *Parser = @ptrCast(@alignCast(c.multipart_parser_get_data(p).?));
     parser._body_finished = true;
     return 0;
 }
 
 pub const Part = struct {
-    headers: std.ArrayList(model.Header),
+    headers: std.array_list.Managed(model.Header),
     name: []const u8,
     filename: ?[]const u8,
     data: []const u8,
@@ -269,7 +264,7 @@ test "parses boundary - missing boundary" {
 
 test "parses body - simple" {
     // given
-    const boundary = "--example-1";
+    const boundary = "example-1";
     const body = "--example-1\r\n" ++
         "Content-Disposition: form-data; name=\"text1\"\r\n" ++
         "\r\n" ++

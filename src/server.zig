@@ -33,7 +33,7 @@ pub const Server = struct {
         var response = model.Response{
             .status = .ok,
             .reason_phrase = null,
-            .headers = try std.ArrayList(model.Header).initCapacity(arena_allocator, 32),
+            .headers = try std.array_list.Managed(model.Header).initCapacity(arena_allocator, 32),
             .body = "",
         };
 
@@ -48,7 +48,7 @@ pub const Server = struct {
         if (request.method != .head and response.status != .not_modified and !response.status.isInformational() and response.status != .no_content) {
             // TODO: check not already there, check haven't set chunked transfer encoding
             var buffer: [20]u8 = undefined;
-            const content_length = std.fmt.bufPrintIntToSlice(&buffer, response.body.len, 10, .lower, .{});
+            const content_length = try std.fmt.bufPrint(&buffer, "{d}", .{response.body.len});
             try response.headers.append(model.Header{ .key = "content-length", .value = content_length });
         }
 
@@ -81,8 +81,8 @@ fn readInto(allocator: std.mem.Allocator, socket: std.posix.fd_t, circular_buffe
     var request = model.Request{
         .method = .get,
         .path = "/",
-        .query = try std.ArrayList(model.QueryParameter).initCapacity(allocator, 8),
-        .headers = try std.ArrayList(model.Header).initCapacity(allocator, 32),
+        .query = try std.array_list.Managed(model.QueryParameter).initCapacity(allocator, 8),
+        .headers = try std.array_list.Managed(model.Header).initCapacity(allocator, 32),
         .body = "",
     };
     errdefer request.query.deinit();
@@ -243,26 +243,29 @@ fn percentToUrlEncoding(string: []u8) []const u8 {
 }
 
 fn writeInto(socket: std.posix.fd_t, response: *const model.Response) !void {
-    const stream = std.net.Stream{ .handle = socket };
+    const net_stream = std.net.Stream{ .handle = socket };
 
     // TODO: ArrayList on the arena. then writev (stream.writevAll(.{});)
+    var stream_buffer: [8096]u8 = undefined;
+    var stream_writer = net_stream.writer(&stream_buffer);
+    var stream = &stream_writer.interface;
 
-    var buffered = std.io.bufferedWriter(stream.writer());
-    try buffered.writer().print("HTTP/1.1 {d}", .{@intFromEnum(response.status)});
+    try stream.print("HTTP/1.1 {d}", .{@intFromEnum(response.status)});
     if (response.reason_phrase orelse response.status.defaultReasonPhrase()) |reason| {
         if (reason.len > 0) {
-            try buffered.writer().writeAll(" ");
-            try buffered.writer().writeAll(reason);
+            try stream.writeAll(" ");
+            try stream.writeAll(reason);
         }
     }
-    try buffered.writer().writeAll("\r\n");
+    try stream.writeAll("\r\n");
     for (response.headers.items) |header| {
-        try buffered.writer().print("{s}: {s}\r\n", .{ header.key, header.value });
+        try stream.print("{s}: {s}\r\n", .{ header.key, header.value });
     }
-    try buffered.writer().writeAll("\r\n");
-    try buffered.flush();
+    try stream.writeAll("\r\n");
+    try stream.flush();
 
-    try stream.writeAll(response.body);
+    // no need to buffer the body
+    try net_stream.writeAll(response.body);
 
     std.posix.close(socket);
 }
@@ -659,7 +662,7 @@ test "sends response - 200 status" {
     var response = model.Response{
         .status = .ok,
         .reason_phrase = null,
-        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .headers = std.array_list.Managed(model.Header).init(std.heap.smp_allocator),
         .body = "",
     };
 
@@ -682,7 +685,7 @@ test "sends response - 204 status" {
     var response = model.Response{
         .status = .no_content,
         .reason_phrase = null,
-        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .headers = std.array_list.Managed(model.Header).init(std.heap.smp_allocator),
         .body = "",
     };
 
@@ -704,7 +707,7 @@ test "sends response - non-standard status" {
     var response = model.Response{
         .status = @enumFromInt(599),
         .reason_phrase = null,
-        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .headers = std.array_list.Managed(model.Header).init(std.heap.smp_allocator),
         .body = "",
     };
     try response.headers.append(model.Header{ .key = "content-length", .value = "0" });
@@ -726,7 +729,7 @@ test "sends response - empty reason phrase" {
     var response = model.Response{
         .status = .ok,
         .reason_phrase = "",
-        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .headers = std.array_list.Managed(model.Header).init(std.heap.smp_allocator),
         .body = "",
     };
     try response.headers.append(model.Header{ .key = "content-length", .value = "0" });
@@ -748,7 +751,7 @@ test "sends response - custom reason phrase" {
     var response = model.Response{
         .status = .ok,
         .reason_phrase = "Well Done",
-        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .headers = std.array_list.Managed(model.Header).init(std.heap.smp_allocator),
         .body = "",
     };
     try response.headers.append(model.Header{ .key = "content-length", .value = "0" });
@@ -770,7 +773,7 @@ test "sends response - with body" {
     var response = model.Response{
         .status = .ok,
         .reason_phrase = null,
-        .headers = std.ArrayList(model.Header).init(std.heap.smp_allocator),
+        .headers = std.array_list.Managed(model.Header).init(std.heap.smp_allocator),
         .body = "hello",
     };
     try response.headers.append(model.Header{ .key = "content-length", .value = "5" });

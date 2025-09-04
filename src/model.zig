@@ -11,8 +11,8 @@ pub const Request = struct {
     /// Part of URI.
     path: []const u8,
     /// Part of URI.
-    query: std.ArrayList(QueryParameter),
-    headers: std.ArrayList(Header),
+    query: std.array_list.Managed(QueryParameter),
+    headers: std.array_list.Managed(Header),
     body: []const u8,
 
     /// Finds the first occurrence of query pameter by key, if any, returning the value.
@@ -110,7 +110,7 @@ pub const Header = struct {
 pub const Response = struct {
     status: StatusCode,
     reason_phrase: ?[]const u8,
-    headers: std.ArrayList(Header),
+    headers: std.array_list.Managed(Header),
     body: []const u8,
 };
 

@@ -79,5 +79,5 @@ test "smoke" {
 
     // then
     try std.testing.expectEqual(response.status, .ok);
-    try std.testing.expectEqualStrings(response.body, "hello");
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "</form>") != null);
 }
