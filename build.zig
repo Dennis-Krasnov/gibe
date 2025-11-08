@@ -57,15 +57,15 @@ pub fn buildExamples(b: *std.Build, gibe_module: *std.Build.Module, target: std.
     const test_step = b.step("test-examples", "Run unit tests in examples");
 
     inline for (examples) |example| {
-        // build
-        const exe_mod = b.createModule(.{
+        const example_module = b.createModule(.{
             .root_source_file = b.path("examples/" ++ example ++ ".zig"),
             .target = target,
             .optimize = optimize,
         });
-        exe_mod.addImport("gibe", gibe_module);
+        example_module.addImport("gibe", gibe_module);
 
-        const exe = b.addExecutable(.{ .name = example, .root_module = exe_mod });
+        // build
+        const exe = b.addExecutable(.{ .name = example, .root_module = example_module });
 
         b.installArtifact(exe);
 
@@ -76,14 +76,7 @@ pub fn buildExamples(b: *std.Build, gibe_module: *std.Build.Module, target: std.
         run_step.dependOn(&run_exe.step);
 
         // test
-        const unit_test_mod = b.createModule(.{
-            .root_source_file = b.path("examples/" ++ example ++ ".zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        unit_test_mod.addImport("gibe", gibe_module);
-
-        const unit_test = b.addTest(.{ .root_module = unit_test_mod, .filters = test_filters });
+        const unit_test = b.addTest(.{ .root_module = example_module, .filters = test_filters });
         const run_unit_test = b.addRunArtifact(unit_test);
 
         test_step.dependOn(&run_unit_test.step);
